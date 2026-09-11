@@ -196,6 +196,59 @@
     color: var(--text-dim);
     margin-top: 60px;
   }
+
+  .stats-row {
+    display: flex;
+    gap: 10px;
+    margin-bottom: 18px;
+  }
+  .stat-tile {
+    flex: 1;
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 12px 10px;
+    text-align: center;
+  }
+  .stat-tile .v {
+    font-size: 22px;
+    font-weight: 700;
+    line-height: 1.15;
+  }
+  .stat-tile .l {
+    font-size: 11px;
+    color: var(--text-dim);
+    margin-top: 3px;
+    line-height: 1.3;
+  }
+  .chart-card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 16px 14px;
+    margin-bottom: 14px;
+  }
+  .chart-card h2 {
+    font-size: 14px;
+    font-weight: 600;
+    margin: 0 0 2px;
+  }
+  .chart-card .cap {
+    font-size: 12px;
+    color: var(--text-dim);
+    margin: 0 0 12px;
+  }
+  .chart-card svg { display: block; width: 100%; overflow: visible; }
+  .bar-fill { fill: var(--accent); }
+  .bar-label { font-size: 10.5px; fill: var(--text-dim); text-anchor: middle; }
+  .axis-label { font-size: 10.5px; fill: var(--text-dim); }
+  .grid-line { stroke: var(--border); stroke-width: 1; }
+  .baseline { stroke: var(--text-dim); stroke-width: 1; opacity: 0.5; }
+
+  #todScroll {
+    scrollbar-width: thin;
+    -webkit-overflow-scrolling: touch;
+  }
 </style>
 </head>
 <body>
@@ -204,7 +257,7 @@
 <script>
 const STORAGE_KEY = 'seizure-events';
 let events = [];
-let view = 'home'; // 'home' | 'history'
+let view = 'home'; // 'home' | 'history' | 'stats'
 let loaded = false;
 
 const app = document.getElementById('app');
@@ -299,11 +352,162 @@ function renderHome() {
     <div class="home-buttons">
       <button class="big-btn log-btn" id="logBtn"><span class="icon">＋</span> Log Seizure</button>
       <button class="big-btn history-btn" id="historyBtn"><span class="icon">☰</span> History (${events.length})</button>
+      <button class="big-btn history-btn" id="statsBtn"><span class="icon">📊</span> Stats</button>
     </div>
     <div class="footer-note">Data is stored privately on this device</div>
   `;
   document.getElementById('logBtn').onclick = logEvent;
   document.getElementById('historyBtn').onclick = () => { view = 'history'; render(); };
+  document.getElementById('statsBtn').onclick = () => { view = 'stats'; render(); };
+}
+
+function dayStart(d) {
+  return new Date(d.getFullYear(), d.getMonth(), d.getDate());
+}
+function fmtDay(d) {
+  return d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' });
+}
+function fmtWeekOf(d) {
+  return 'w/o ' + d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' });
+}
+function svgEl(tag, attrs) {
+  return '<' + tag + ' ' + Object.entries(attrs).map(([k, v]) => `${k}="${v}"`).join(' ') + '/>';
+}
+
+function renderStats() {
+  const topbar = `
+    <div class="topbar">
+      <button class="back-btn" id="backBtn">‹ Back</button>
+      <div></div>
+    </div>
+  `;
+
+  if (events.length === 0) {
+    app.innerHTML = topbar + `<div class="empty-state">No entries yet.<br>Log a seizure first to see stats here.</div>`;
+    document.getElementById('backBtn').onclick = () => { view = 'home'; render(); };
+    return;
+  }
+
+  const dated = events.map(e => ({ d: new Date(e.timestamp) })).sort((a, b) => a.d - b.d);
+
+  // ---- stat tiles ----
+  const total = dated.length;
+  const firstDay = dayStart(dated[0].d);
+  const lastDay = dayStart(dated[dated.length - 1].d);
+  const spanDays = Math.round((lastDay - firstDay) / 86400000) + 1;
+  const avg = (total / spanDays).toFixed(1);
+  const distinctDays = new Set(dated.map(x => dayStart(x.d).getTime())).size;
+
+  let html = `<div class="stats-row">
+    <div class="stat-tile"><div class="v">${total}</div><div class="l">Total logged</div></div>
+    <div class="stat-tile"><div class="v">${distinctDays}</div><div class="l">Days with an entry</div></div>
+    <div class="stat-tile"><div class="v">${avg}</div><div class="l">Avg per day</div></div>
+  </div>`;
+
+  // ---- frequency chart: daily if <=20 distinct days tracked, else weekly ----
+  const useWeekly = spanDays > 20;
+  const buckets = new Map();
+  dated.forEach(x => {
+    let keyDate;
+    if (useWeekly) {
+      const d = dayStart(x.d);
+      const dow = (d.getDay() + 6) % 7; // Monday = 0
+      keyDate = new Date(d.getFullYear(), d.getMonth(), d.getDate() - dow);
+    } else {
+      keyDate = dayStart(x.d);
+    }
+    const key = keyDate.getTime();
+    buckets.set(key, (buckets.get(key) || 0) + 1);
+  });
+  const bucketList = [...buckets.entries()].sort((a, b) => a[0] - b[0]).map(([t, c]) => ({ date: new Date(t), count: c }));
+  const shown = bucketList.slice(-14); // most recent 14 buckets
+
+  const chartW = 400, chartH = 170, padL = 22, padR = 6, padT = 14, padB = 24;
+  const plotW = chartW - padL - padR, plotH = chartH - padT - padB;
+  const maxCount = Math.max(1, ...shown.map(b => b.count));
+  const niceMax = Math.max(2, Math.ceil(maxCount / 2) * 2);
+  const step = plotW / shown.length;
+  const bw = Math.min(30, step * 0.55);
+
+  let svg = `<svg viewBox="0 0 ${chartW} ${chartH}" role="img" aria-label="Incidents ${useWeekly ? 'per week' : 'per day'}">`;
+  const ticks = 4;
+  for (let i = 0; i <= ticks; i++) {
+    const val = Math.round((niceMax / ticks) * i);
+    const y = padT + plotH - (val / niceMax) * plotH;
+    svg += svgEl('line', { class: 'grid-line', x1: padL, x2: chartW - padR, y1: y, y2: y });
+    svg += `<text class="axis-label" x="${padL - 5}" y="${y + 3}" text-anchor="end">${val}</text>`;
+  }
+  shown.forEach((b, i) => {
+    const x = padL + step * i + (step - bw) / 2;
+    const h = (b.count / niceMax) * plotH;
+    const y = padT + plotH - h;
+    svg += svgEl('rect', { class: 'bar-fill', x, y, width: bw, height: Math.max(h, 2), rx: 4, ry: 4 });
+    svg += `<text class="bar-label" x="${x + bw / 2}" y="${y - 5}">${b.count}</text>`;
+    const label = useWeekly ? fmtDay(b.date) : fmtDay(b.date);
+    svg += `<text class="axis-label" x="${x + bw / 2}" y="${chartH - 6}" text-anchor="middle">${label}</text>`;
+  });
+  svg += svgEl('line', { class: 'baseline', x1: padL, x2: chartW - padR, y1: padT + plotH, y2: padT + plotH });
+  svg += `</svg>`;
+
+  html += `<div class="chart-card">
+    <h2>Incidents ${useWeekly ? 'per week' : 'per day'}</h2>
+    <p class="cap">${useWeekly ? 'Most recent 14 weeks' : 'Most recent 14 days with an entry'}</p>
+    ${svg}
+  </div>`;
+
+  // ---- time of day: one dot per episode, one column per day, scrolls left-right ----
+  const dayGroups = new Map();
+  dated.forEach(x => {
+    const key = dayStart(x.d).getTime();
+    if (!dayGroups.has(key)) dayGroups.set(key, []);
+    dayGroups.get(key).push(x.d);
+  });
+  const todDays = [...dayGroups.entries()].sort((a, b) => a[0] - b[0]).map(([t, list]) => ({ date: new Date(t), list }));
+
+  const todH = 200, todPadT = 10, todPadB = 26;
+  const todPlotH = todH - todPadT - todPadB;
+  const dayW = 52;
+  const todW = Math.max(todDays.length * dayW, dayW);
+  const hourTicks = [0, 6, 12, 18, 24];
+  const tickY = h => todPadT + todPlotH - (h / 24) * todPlotH;
+
+  let axisHtml = hourTicks.map(h => {
+    const label = h === 24 ? '24:00' : String(h).padStart(2, '0') + ':00';
+    return `<div style="position:absolute; top:${tickY(h) - 6}px; right:4px; font-size:10.5px; color:var(--text-dim); white-space:nowrap;">${label}</div>`;
+  }).join('');
+
+  let todSvg = `<svg width="${todW}" height="${todH}" role="img" aria-label="Time of day per episode" style="display:block; width:${todW}px; max-width:none;">`;
+  hourTicks.forEach(h => {
+    const y = tickY(h);
+    todSvg += svgEl('line', { class: 'grid-line', x1: 0, x2: todW, y1: y, y2: y });
+  });
+  todDays.forEach((day, i) => {
+    const cx = i * dayW + dayW / 2;
+    if (i > 0) {
+      todSvg += svgEl('line', { x1: i * dayW, x2: i * dayW, y1: todPadT, y2: todPadT + todPlotH, stroke: 'var(--border)', 'stroke-width': 1 });
+    }
+    day.list.forEach(d => {
+      const frac = (d.getHours() + d.getMinutes() / 60) / 24;
+      const y = todPadT + todPlotH - frac * todPlotH;
+      todSvg += svgEl('circle', { cx, cy: y, r: 5, fill: 'var(--accent)', stroke: 'var(--card)', 'stroke-width': 2 });
+    });
+    todSvg += `<text class="axis-label" x="${cx}" y="${todH - 8}" text-anchor="middle">${fmtDay(day.date)}</text>`;
+  });
+  todSvg += `</svg>`;
+
+  html += `<div class="chart-card">
+    <h2>Time of day</h2>
+    <p class="cap">Every episode, by the time it happened — one column per day${todDays.length > 7 ? ', scroll for earlier days' : ''}</p>
+    <div style="display:flex;">
+      <div style="width:36px; flex-shrink:0; position:relative; height:${todH}px;">${axisHtml}</div>
+      <div id="todScroll" style="overflow-x:auto; flex:1;">${todSvg}</div>
+    </div>
+  </div>`;
+
+  app.innerHTML = topbar + html;
+  document.getElementById('backBtn').onclick = () => { view = 'home'; render(); };
+  const todScroll = document.getElementById('todScroll');
+  if (todScroll) todScroll.scrollLeft = todScroll.scrollWidth;
 }
 
 function renderHistory() {
@@ -369,6 +573,7 @@ function render() {
     return;
   }
   if (view === 'home') renderHome();
+  else if (view === 'stats') renderStats();
   else renderHistory();
 }
 
