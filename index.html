@@ -466,7 +466,15 @@ function renderStats() {
     if (!dayGroups.has(key)) dayGroups.set(key, []);
     dayGroups.get(key).push(x.d);
   });
-  const todDays = [...dayGroups.entries()].sort((a, b) => a[0] - b[0]).map(([t, list]) => ({ date: new Date(t), list }));
+  // include every calendar day in the range, even ones with no episodes logged
+  const todDays = [];
+  const todCursor = dayStart(dated[0].d);
+  const todLast = dayStart(dated[dated.length - 1].d).getTime();
+  while (todCursor.getTime() <= todLast) {
+    const key = todCursor.getTime();
+    todDays.push({ date: new Date(todCursor), list: dayGroups.get(key) || [] });
+    todCursor.setDate(todCursor.getDate() + 1);
+  }
 
   const todH = 200, todPadT = 10, todPadB = 26;
   const todPlotH = todH - todPadT - todPadB;
